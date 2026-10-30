@@ -38,6 +38,19 @@
       }
     }
   },
+  "identity": {
+    "description": "Bot 身份识别",
+    "hint": "统一 cron 自动任务、后台任务和真实消息中的 Bot 身份；多 Bot 或多账号环境建议固定填写。",
+    "type": "object",
+    "items": {
+      "bot_id": {
+        "description": "固定 Bot ID",
+        "hint": "留空时自动从平台实例和事件解析唯一 Bot ID；cron 等合成事件会回退到该值。多 Bot 环境请填写本实例的真实账号 ID，避免笔记归属串档。",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
   "memory_capture": {
     "description": "记忆捕获",
     "hint": "控制插件是否记录用户消息、Bot 回复和轻量身份信息。",

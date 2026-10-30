@@ -11188,6 +11188,61 @@ class MemoryStore(SummaryBatchStore):
             owner_bot_id,
         )
 
+    async def reassign_memory_bot_identity(self, memory_id: str, bot_id: str) -> bool:
+        """Move both the owner and the Bot subject to a canonical Bot ID.
+
+        Used to repair legacy rows written by synthetic events whose
+        ``self_id`` was a scheduler placeholder rather than the real account.
+        """
+        return await self._run_recoverable_database_operation(
+            self._reassign_memory_bot_identity_sync,
+            memory_id,
+            bot_id,
+        )
+
+    def _reassign_memory_bot_identity_sync(self, memory_id: str, bot_id: str) -> bool:
+        from .identity import is_placeholder_bot_id
+
+        memory_id = clean_text(memory_id, 120)
+        bot_id = clean_text(bot_id, 120)
+        if not memory_id or not bot_id or is_placeholder_bot_id(bot_id):
+            return False
+        with self._lock:
+            with self._transaction_sync():
+                row = self._conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+                if not row:
+                    return False
+                metadata = json_loads(row["metadata"], {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata["owner_bot_id"] = bot_id
+                atom = self._memory_atom_record_for_row(
+                    row,
+                    metadata=json_dumps(metadata),
+                    owner_bot_id=bot_id,
+                    subject_id=bot_id,
+                )
+                cur = self._conn.execute(
+                    """
+                    UPDATE memories
+                    SET owner_bot_id=?, subject_kind='bot', subject_id=?, metadata=?,
+                        canonical_key=?, content_fingerprint=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        bot_id,
+                        bot_id,
+                        json_dumps(metadata),
+                        atom.canonical_key,
+                        atom.content_fingerprint,
+                        utc_now(),
+                        memory_id,
+                    ),
+                )
+                refreshed = self._conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+                self._upsert_memory_fts_row(refreshed)
+                return cur.rowcount > 0
+
     def _update_memory_owner_bot_sync(self, memory_id: str, owner_bot_id: str) -> bool:
         memory_id = clean_text(memory_id, 120)
         owner_bot_id = clean_text(owner_bot_id, 120)

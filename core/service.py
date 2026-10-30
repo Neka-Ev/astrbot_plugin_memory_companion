@@ -58,7 +58,14 @@ from .continuity import build_context_snapshot
 from .memory_revision import current_memory, memory_ref
 from .emotion_event_contract import normalize_emotion_event
 from .emotion_targeting import memory_emotion_refs
-from .identity import IdentityResolver, looks_like_command, maybe_await, normalize_session_context_fields, session_target_id
+from .identity import (
+    IdentityResolver,
+    is_placeholder_bot_id,
+    looks_like_command,
+    maybe_await,
+    normalize_session_context_fields,
+    session_target_id,
+)
 from .importance import ImportanceEvaluator
 from .injection import (
     MEMORY_COMPANION_INJECTION_FOOTER,
@@ -522,11 +529,15 @@ class MemoryCompanionService:
 
     def _resolve_default_bot_id(self, _event: Any = None) -> str:
         """Return a Bot ID only when the runtime exposes one unambiguous value."""
+        configured = clean_text(self.config.get("identity.bot_id", ""), 120)
+        if configured and not is_placeholder_bot_id(configured):
+            return configured
+
         ids: set[str] = set()
 
         def add(value: Any) -> None:
             value = clean_text(value, 120)
-            if value and value.casefold() not in {"self", "bot", "bot_self", "unknown"}:
+            if value and not is_placeholder_bot_id(value):
                 ids.add(value)
 
         context = self.context
@@ -8233,7 +8244,59 @@ class MemoryCompanionService:
         owner_bot_id = clean_text(metadata.get("owner_bot_id"), 120)
         current_bot_id = clean_text(self._bot_subject_id(ctx), 120) or "self"
         subject_id = clean_text(record.subject.id, 120)
-        return owner_bot_id == current_bot_id and subject_id in {"", "self", current_bot_id}
+        if owner_bot_id == current_bot_id and subject_id in {"", "self", current_bot_id}:
+            return True
+        # 1.6.3-2.3.1 创建的 cron 笔记会把 AstrBot 调度器的占位 self_id
+        # "astrbot" 当成真实 Bot。若当前事件已解析出真实 Bot，且笔记仍属于
+        # 同一会话，则按同一 Bot 放行；不同会话不在同一窗口内猜测归属。
+        if (
+            not is_placeholder_bot_id(current_bot_id)
+            and record.platform == "cron"
+            and clean_text(record.session_id, 200) == clean_text(ctx.session_id, 200)
+            and is_placeholder_bot_id(owner_bot_id)
+            and (not subject_id or is_placeholder_bot_id(subject_id) or subject_id == current_bot_id)
+        ):
+            return True
+        return False
+
+    async def _migrate_legacy_companion_note_owners(
+        self,
+        ctx: SessionContext,
+        records: list[MemoryRecord],
+    ) -> None:
+        """Backfill scheduler-owned notes once a stable Bot ID is known.
+
+        Only runs when the host exposes exactly one Bot ID (or the operator
+        pins ``identity.bot_id``).  Multi-Bot deployments keep the legacy rows
+        untouched and fall back to the same-session compatibility check above.
+        """
+        current_bot_id = clean_text(self._bot_subject_id(ctx), 120)
+        if is_placeholder_bot_id(current_bot_id):
+            return
+        stable_bot_id = clean_text(self._resolve_default_bot_id(None), 120)
+        if not stable_bot_id or stable_bot_id != current_bot_id:
+            return
+        migrated = 0
+        for record in records:
+            if record.platform != "cron":
+                continue
+            metadata = record.metadata if isinstance(record.metadata, dict) else {}
+            owner_bot_id = clean_text(metadata.get("owner_bot_id"), 120)
+            subject_id = clean_text(record.subject.id, 120)
+            if not (is_placeholder_bot_id(owner_bot_id) or is_placeholder_bot_id(subject_id)):
+                continue
+            if await self.store.reassign_memory_bot_identity(record.id, stable_bot_id):
+                metadata["owner_bot_id"] = stable_bot_id
+                record.metadata = metadata
+                record.owner_bot_id = stable_bot_id
+                record.subject = EntityRef.bot_self(bot_id=stable_bot_id)
+                migrated += 1
+        if migrated:
+            logger.info(
+                "[MemoryCompanion] 已将 %s 条 cron 陪伴笔记归属回填到真实 Bot: %s",
+                migrated,
+                stable_bot_id,
+            )
 
     async def _owned_companion_notes(
         self,
@@ -8248,6 +8311,7 @@ class MemoryCompanionService:
             memory_type="companion_note",
             visibility="bot_self",
         )
+        await self._migrate_legacy_companion_note_owners(ctx, records)
         owned = [record for record in records if self._owned_companion_note(record, ctx)]
         query = clean_text(query, 500).casefold()
         if query:

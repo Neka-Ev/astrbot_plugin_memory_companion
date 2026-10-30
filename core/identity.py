@@ -7,6 +7,17 @@ from typing import Any, Callable
 from .models import EntityRef, SessionContext, clean_text
 
 
+# AstrBot's cron/background events synthesize ``self_id="astrbot"`` because the
+# scheduler does not know the real platform account.  Treat that value (and the
+# other adapter placeholders) as "unknown" so the host can fill in the real Bot
+# ID instead of persisting a scheduler alias as the owner of Bot-private data.
+BOT_ID_PLACEHOLDERS = frozenset({"", "self", "bot", "bot_self", "unknown", "astrbot"})
+
+
+def is_placeholder_bot_id(value: Any) -> bool:
+    return clean_text(value, 120).casefold() in BOT_ID_PLACEHOLDERS
+
+
 async def maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
@@ -117,11 +128,13 @@ class IdentityResolver:
 
         user_name = await self._call(event, "get_sender_name")
         bot_id = await self._call(event, "get_self_id")
-        if not bot_id and callable(self.bot_id_fallback):
+        if is_placeholder_bot_id(bot_id) and callable(self.bot_id_fallback):
             try:
-                bot_id = await maybe_await(self.bot_id_fallback(event))
+                fallback_bot_id = await maybe_await(self.bot_id_fallback(event))
             except Exception:
-                bot_id = ""
+                fallback_bot_id = ""
+            if not is_placeholder_bot_id(fallback_bot_id):
+                bot_id = clean_text(fallback_bot_id, 120)
         persona_id = clean_text(
             getattr(event, "private_companion_persona_id", "")
             or getattr(event, "persona_id", ""),

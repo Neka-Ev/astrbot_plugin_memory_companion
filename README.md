@@ -212,6 +212,10 @@ astrbot_plugin_memory_companion
 
 ## 配置重点
 
+### Bot 身份识别
+
+`identity.bot_id` 用于固定当前实例的真实 Bot ID。留空时插件会从平台实例和事件推断唯一 ID；cron、后台任务等合成事件也会使用这个值写入记忆和陪伴笔记。多 Bot、多账号或平台实例无法提供唯一 `self_id` 时，建议手动填写，避免不同账号的 Bot 私有数据互相串档。
+
 ### 记忆捕获
 
 `memory_capture` 控制用户消息、Bot 回复、稳定事实和关系边的记录。当前版本不会把原话直接写成长期记忆；原始消息主要进入时间线，长期记忆由总结和明确工具写入产生。
@@ -301,6 +305,8 @@ PrivateCompanion 读取日程连续性或每日穿搭时会协商使用 `schedul
 ### Bot 记忆检索不到时的排查与重新绑定
 
 `owner_bot_context_missing` 表示本轮事件没有解析出 Bot ID，优先检查适配器事件是否提供 `get_self_id()`，以及平台实例/执行器插件是否配置了唯一 Bot ID。插件只会在运行时发现唯一 ID 时自动补齐，不会在多个 Bot 间猜测。
+
+AstrBot 的 cron / 后台任务会创建 `self_id="astrbot"` 的合成事件，而不是真实 QQ 账号。插件会把这个调度器占位值视为“未知”，优先用平台实例或 `identity.bot_id` 解析真实 Bot；历史上已经写成 `astrbot` 的陪伴笔记，会在确认唯一 Bot 后自动回填归属。多 Bot 环境建议显式配置 `identity.bot_id`，避免合成事件把不同账号的笔记混在一起。
 
 `owner_bot_mismatch` 表示记忆已绑定到其它 Bot，属于正常隔离；`validity=expired` 表示有效期已结束；`profile_state_missing` 表示画像候选缺少必要状态。管理面板检索选择“全库”时没有运行时 Bot 上下文，不能用该模式判断 Bot Personal 记忆是否可注入，请使用具体私聊/群聊会话诊断。
 
